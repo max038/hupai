@@ -1,21 +1,22 @@
+import ctypes
 import os
 import re
-import time
 import threading
-import pyautogui
-import pytesseract
-import configparser
-import ctypes, win32con, ctypes.wintypes, win32gui
+import time
+from configparser import ConfigParser
+from ctypes import wintypes
 from datetime import datetime, timedelta
 
-CONSOLE_LEFT = 0
-CONSOLE_TOP = 0
-CONSOLE_WIDTH = 500
-CONSOLE_HEIGHT = 200
+import pyautogui
+import pytesseract
+from win32 import win32gui
+from win32.lib import win32con
+
+IMG_RECG_CONFIDENCE = 0.8
 
 class HotKey(threading.Thread):
 
-    def __init__(self, config):
+    def __init__(self):
         super(HotKey, self).__init__()
         self.index = 99
         self.keys = {}
@@ -27,7 +28,7 @@ class HotKey(threading.Thread):
             if not user32.RegisterHotKey(None, k, info[0], info[1]):
                 raise RuntimeError
         try:
-            msg = ctypes.wintypes.MSG()
+            msg = wintypes.MSG()
             while user32.GetMessageA(ctypes.byref(msg), None, 0, 0) != 0:
                 if msg.message == win32con.WM_HOTKEY:
                     if msg.wParam in self.keys:
@@ -36,45 +37,32 @@ class HotKey(threading.Thread):
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageA(ctypes.byref(msg))
         finally:
-            user32.UnregisterHotKey(None, 1)
+            for _id in self.keys:
+                user32.UnregisterHotKey(None, _id)
 
-    def register_hotkey(self, mod, key, handler, arg):
+    def register(self, mod, key, handler, arg):
         self.keys[self.index] = (mod, key, handler, arg)
         self.index += 1
 
 
-class MyConfig(object):
+class MyConfig(ConfigParser):
 
-    CONFIG_FILE = "config.ini"
+    SECTION_GENERAL = "general"
     SECTION_POSITION = "position"
     SECTION_TIME = "time"
-    TS_FORMAT = "%M:%S.%f"
-    DELTA_FORMAT = "%S.%f"
+    FORMAT_TIME = "%M:%S.%f"
+    FORMAT_TIME_DELTA = "%S.%f"
+    
+    def __init__(self, filename):
+        self.cfg = ConfigParser()
+        if os.path.exists(filename):
+            self.cfg.read(filename)
+        self.lock = threading.Lock()
+        self.filename = filename
 
-    def __init__(self):
-        self.cfg = configparser.ConfigParser()
-        if os.path.exists(MyConfig.CONFIG_FILE):
-            self.cfg.read(MyConfig.CONFIG_FILE)
-        self.lock = threading.RLock()
-
-    def __cfg_update(self):
-        with open(MyConfig.CONFIG_FILE, "w") as cfgfile:
-            self.cfg.write(cfgfile)
-
-    def set_pos(self, key, x, y):
-        with self.lock:
-            if MyConfig.SECTION_POSITION not in self.cfg:
-                self.cfg[MyConfig.SECTION_POSITION] = {}
-            section = self.cfg[MyConfig.SECTION_POSITION]
-            section[key] = "%d,%d"%(x, y)
-            self.__cfg_update()
-
-    def get_pos(self, key):
-        with self.lock:
-            if MyConfig.SECTION_POSITION not in self.cfg:
-                raise Exception("position section not exist")
-            section = self.cfg[MyConfig.SECTION_POSITION]
-            return [int(i) for i in section[key].split(",")]
+    def __update(self):
+        with open(self.filename, "w") as f:
+            self.cfg.write(f)
 
     def dump(self):
         with self.lock:
@@ -83,159 +71,193 @@ class MyConfig(object):
                 for k in section:
                     print(s, k, section[k])
 
-    def get_ts(self, key):
+    def get_position(self, key):
         with self.lock:
-            if MyConfig.SECTION_TIME not in self.cfg:
-                raise Exception("time section not exist")
-            section = self.cfg[MyConfig.SECTION_TIME]
-            ts = datetime.strptime(section[key], MyConfig.TS_FORMAT)
-            return datetime.now().replace(minute=ts.minute, second=ts.second, microsecond=ts.microsecond)
+            vals = self.cfg[MyConfig.SECTION_POSITION][key].split(",")
+            return (int(vals[0]), int(vals[1]))
 
-    def set_ts(self, key, ts):
+    def set_position(self, key, x, y):
         with self.lock:
-            if MyConfig.SECTION_TIME not in self.cfg:
-                raise Exception("time section not exist")
-            section = self.cfg[MyConfig.SECTION_TIME]
-            section[key] = ts.strftime(MyConfig.TS_FORMAT)
-            self.__cfg_update()
+            self.cfg[MyConfig.SECTION_POSITION][key] = "%d,%d"%(x, y)
+            self.__update()
 
-    def get_adjust(self):
+    def get_time(self, key):
         with self.lock:
-            return self.cfg.getfloat("time", "adjust")
+            t = datetime.strptime(self.cfg[MyConfig.SECTION_TIME][key], MyConfig.FORMAT_TIME)
+            return datetime.now().replace(minute=t.minute, second=t.second, microsecond=t.microsecond)
 
+    def set_time(self, key, time):
+        with self.lock:
+            self.cfg[MyConfig.SECTION_TIME][key] = time.strftime(MyConfig.FORMAT_TIME)
+            self.__update()
 
-def TopMostMe():
-    hwnd = win32gui.GetForegroundWindow()
-    #(left, top, right, bottom) = win32gui.GetWindowRect(hwnd)
-    #win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, left, top, right-left, bottom-top, 0)
-    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, CONSOLE_LEFT, CONSOLE_TOP, CONSOLE_WIDTH, CONSOLE_HEIGHT, 0)
+    def get_time_adjust(self):
+        with self.lock:
+            t_adj = self.cfg.getfloat(MyConfig.SECTION_TIME, "time_adjust")
+            print("time_adjust {}".format(t_adj))
+            return timedelta(seconds=int(t_adj), microseconds=int((t_adj -int(t_adj)) * 1e6))
 
-def hk_add(cfg):
-    x, y = pyautogui.position()
-    print("add {}.{}".format(x, y))
-    cfg.set_pos("add", x, y)
+    def get_top_most(self):
+        with self.lock:
+            return self.cfg.getboolean(MyConfig.SECTION_GENERAL, "top_most")
 
-def hk_submit(cfg):
-    x, y = pyautogui.position()
-    print("submit {}.{}".format(x, y))
-    cfg.set_pos("submit", x, y)
+    def get_working_area(self):
+        with self.lock:
+            (x, y, w, h) = self.cfg.get(MyConfig.SECTION_GENERAL, "working_area").split(",")
+            return (int(x), int(y), int(w), int(h))
 
-def hk_ok(cfg):
-    x, y = pyautogui.position()
-    print("ok {}.{}".format(x, y))
-    cfg.set_pos("ok", x, y)
-
-def hk_input(cfg):
-    x, y = pyautogui.position()
-    print("input {}.{}".format(x, y))
-    cfg.set_pos("input", x, y)
-
-def hk_test(cfg):
-    print("test")
-    ts = datetime.now()
-
-    ts1 = ts + timedelta(seconds=0)
-    cfg.set_ts("test_time_submit", ts1)
-    
-    ts2 = ts1 + timedelta(seconds=7)
-    cfg.set_ts("test_time_upload", ts2)
-
-    cli = Clicker(cfg, True)
-    cli.start()
-
-def hk_real(cfg):
-    print("real")
-    cli = Clicker(cfg, False)
-    cli.start()
-
-def hk_debug(cfg):
-    print("debug")
-    box = pyautogui.locateOnScreen("que_ding.png", confidence=0.7)
-    print(box)
+    def get_click_input(self):
+        with self.lock:
+            return self.cfg.getboolean(MyConfig.SECTION_GENERAL, "click_input")
 
 
 class Clicker(threading.Thread):
 
-    def __init__(self, config, isTest):
+    def __init__(self, config, immediate):
         super(Clicker, self).__init__()
         self.cfg = config
-        self.isTest = isTest
+        self.immediate = immediate
 
     def run(self):
-        t_adj = self.cfg.get_adjust()
-        t_adj_delta = timedelta(seconds=int(t_adj), microseconds=((t_adj -int(t_adj)) * 1e6))
-
-        if self.isTest:
-            t1 = self.cfg.get_ts("test_time_submit")
-            t2 = self.cfg.get_ts("test_time_upload")
+        if self.immediate:
+            t1 = datetime.now()
+            t2 = t1 + timedelta(seconds=7)
         else:
-            t1 = self.cfg.get_ts("time_submit")
-            t2 = self.cfg.get_ts("time_upload")
+            t_adj = self.cfg.get_time_adjust()
+            t1 = self.cfg.get_time("time_submit") + t_adj
+            t2 = self.cfg.get_time("time_upload") + t_adj
         
-        t1_adj = t1 + t_adj_delta
-        t2_adj = t2 + t_adj_delta
+        print("ts1: {} ts2: {}".format(t1.strftime(MyConfig.FORMAT_TIME), t2.strftime(MyConfig.FORMAT_TIME)))
 
-        print("ts1: {} ts2: {} adjust: {}".format(t1.strftime(MyConfig.TS_FORMAT), t2.strftime(MyConfig.TS_FORMAT), t_adj))
-        print("aj1: {} aj2: {}".format(t1_adj.strftime(MyConfig.TS_FORMAT), t2_adj.strftime(MyConfig.TS_FORMAT)))
-
-        while datetime.now() < t1_adj:
+        while datetime.now() < t1:
             pass
 
-        print("add")
-        pyautogui.click(*self.cfg.get_pos("add"))
-        print("submit")
-        pyautogui.click(*self.cfg.get_pos("submit"))
+        print("add price")
+        if self.immediate:
+            pyautogui.click(*self.cfg.get_position("add_300"))
+        else:
+            pyautogui.click(*self.cfg.get_position("add_cust"))
 
-        time.sleep(0.1)
+        print("bid")
+        pyautogui.click(*self.cfg.get_position("bid"))
 
-        print("input")
         for i in range(3):
-            region = (935, 526, 624, 420)
-            pos = pyautogui.locateOnScreen("nin_de.png", confidence=0.8, region=region)
+            pos = self.locate_img_pos("nin_de.png")
             if pos:
-                print("title found")
-                pos = pyautogui.locateOnScreen("shua_xin.png", confidence=0.8, region=region)
+                print("title found ({})".format(i))
+                pos = self.locate_img_pos("refresh.png")
                 if pos:
                     print("refresh")
-                    center = pyautogui.center(pos)
-                    pyautogui.click(center.x, center.y)
+                    pyautogui.click(*pos)
                 break
-        #pyautogui.click(*self.cfg.get_pos("input"))
+        else:
+            print("no title found")
+        
+        if self.cfg.get_click_input():
+            pyautogui.click(*self.cfg.get_position("input_window"))
 
-        re_center = None
-        pos = pyautogui.locateOnScreen("que_ding.png", confidence=0.7, region=region)
-        if pos:
-            center = pyautogui.center(pos)
-            re_center = (center.x, center.y)
-            print("re-center {}.{}".format(*re_center))
+        submit_calibrate = self.locate_img_pos("submit.png")
+        if submit_calibrate:
+            print("submit pos re-calibrate {},{}".format(*submit_calibrate))
 
-        while datetime.now() < t2_adj:
+        while datetime.now() < t2:
             pass
 
-        print("ok")
-        if re_center:
-            pyautogui.click(*re_center)
-        p = self.cfg.get_pos("ok")
-        pyautogui.click(*p)
-        pyautogui.click(p[0] - 90, p[1])
-        pyautogui.click(p[0] + 90, p[1])
+        print("submit")
+        if submit_calibrate:
+            pyautogui.click(*submit_calibrate)
+        else:
+            p = self.cfg.get_position("submit")
+            pyautogui.click(*p)
+            pyautogui.click(p[0] - 90, p[1])
+            pyautogui.click(p[0] + 90, p[1])
 
-        print("done")
+        print("done!")
 
+    def locate_img_pos(self, path_to_img):
+        pos = pyautogui.locateOnScreen(path_to_img, confidence=IMG_RECG_CONFIDENCE, region=self.cfg.get_working_area())
+        if pos:
+            center = pyautogui.center(pos)
+            return (center.x, center.y)
+        else:
+            return None
+
+
+class Calibration(threading.Thread):
+
+    def __init__(self, config):
+        super(Calibration, self).__init__()
+        self.cfg = config
+
+    def locate_img_pos(self, path_to_img):
+        pos = pyautogui.locateOnScreen(path_to_img, confidence=IMG_RECG_CONFIDENCE, region=self.cfg.get_working_area())
+        if pos:
+            center = pyautogui.center(pos)
+            return (center.x, center.y)
+        else:
+            return None
+
+    def check(self, path):
+        name = os.path.splitext(os.path.basename(path))[0]
+        pos = self.locate_img_pos(path)
+        if pos:
+            print("{} {},{}".format(name, *pos))
+            self.cfg.set_position(name, *pos)
+        else:
+            print("NO {}".format(name))
+
+    def run(self):
+        print("=" * 60)
+        self.check("add_cust.png")
+        self.check("add_300.png")
+        self.check("bid.png")
+        self.check("submit.png")
+        self.check("refresh.png")
+        print("calibration done!")
+    
+
+def TopMostMe(x, y, width, height):
+    hwnd = win32gui.GetForegroundWindow()
+    #(left, top, right, bottom) = win32gui.GetWindowRect(hwnd)
+    #win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, left, top, right-left, bottom-top, 0)
+    win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, x, y, width, height, 0)
+
+def hk_pos(cfg):
+    x, y = pyautogui.position()
+    print("position {},{}".format(x, y))
+
+def hk_bid_immediate(cfg):
+    Clicker(cfg, True).start()
+
+def hk_bid_final(cfg):
+    if False:
+        now = datetime.now()
+        cfg.set_time("time_submit", now)
+        cfg.set_time("time_upload", now + timedelta(seconds=7))
+    Clicker(cfg, False).start()
+
+def hk_calibrate(cfg):
+    Calibration(cfg).start()
+
+def hk_debug(cfg):
+    print("debug")
+    box = pyautogui.locateOnScreen("submit.png", confidence=IMG_RECG_CONFIDENCE)
+    print(box)
 
 if __name__=='__main__':
-    TopMostMe()
-    cfg = MyConfig()
+    cfg = MyConfig("settings.ini")
+    
+    if cfg.get_top_most():
+        TopMostMe(0, 0, 500, 200)
+
     cfg.dump()
 
-    key = HotKey(cfg)
-    key.register_hotkey(win32con.MOD_CONTROL, ord("8"), hk_add, cfg)    # add custom value
-    key.register_hotkey(win32con.MOD_CONTROL, ord("9"), hk_submit, cfg) # submit custom price
-    key.register_hotkey(win32con.MOD_CONTROL, ord("1"), hk_input, cfg)  # input window
-    key.register_hotkey(win32con.MOD_CONTROL, ord("2"), hk_ok, cfg)     # upload final price
-    key.register_hotkey(win32con.MOD_CONTROL, ord("0"), hk_test, cfg)   # trigger oneshot submit
-    key.register_hotkey(win32con.MOD_CONTROL, ord("6"), hk_real, cfg)   # trigger time based submit
-    key.register_hotkey(win32con.MOD_CONTROL, ord("4"), hk_debug, cfg)
-    key.start()
+    hotkey = HotKey()
+    hotkey.register(win32con.MOD_CONTROL, ord("0"), hk_bid_immediate, cfg)
+    hotkey.register(win32con.MOD_CONTROL, ord("6"), hk_bid_final, cfg)
+    hotkey.register(win32con.MOD_CONTROL, ord("1"), hk_pos, None)
+    hotkey.register(win32con.MOD_CONTROL, ord("2"), hk_calibrate, cfg)
+    hotkey.register(win32con.MOD_CONTROL, ord("4"), hk_debug, cfg)
+    hotkey.start()
 
-    key.join()
+    hotkey.join()
