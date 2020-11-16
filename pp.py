@@ -103,8 +103,8 @@ class MyConfig(ConfigParser):
 
     def get_working_area(self):
         with self.lock:
-            (x, y, w, h) = self.cfg.get(MyConfig.SECTION_GENERAL, "working_area").split(",")
-            return (int(x), int(y), int(w), int(h))
+            (x, y, x1, y1) = self.cfg.get(MyConfig.SECTION_GENERAL, "working_area").split(",")
+            return (int(x), int(y), int(x1) - int(x), int(y1) - int(y))
 
     def get_click_input(self):
         with self.lock:
@@ -239,11 +239,6 @@ def hk_bid_final(cfg):
 def hk_calibrate(cfg):
     Calibration(cfg).start()
 
-def hk_debug(cfg):
-    print("debug")
-    box = pyautogui.locateOnScreen("submit.png", confidence=IMG_RECG_CONFIDENCE)
-    print(box)
-
 if __name__=='__main__':
     cfg = MyConfig("settings.ini")
     
@@ -257,7 +252,6 @@ if __name__=='__main__':
     hotkey.register(win32con.MOD_CONTROL, ord("6"), hk_bid_final, cfg)
     hotkey.register(win32con.MOD_CONTROL, ord("1"), hk_pos, None)
     hotkey.register(win32con.MOD_CONTROL, ord("2"), hk_calibrate, cfg)
-    hotkey.register(win32con.MOD_CONTROL, ord("4"), hk_debug, cfg)
     hotkey.start()
 
     hotkey.join()
